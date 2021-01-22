@@ -4,11 +4,12 @@ import logging
 import numpy as np
 import time
 import random
-
+import pandas as pd
 
 import torch
 from torch.utils.data import Dataset
 import torch.nn as nn
+from torchvision import transforms
 
 from PIL import Image, ImageFilter
 
@@ -23,6 +24,15 @@ class GaussianBlur(object):
         sigma = random.uniform(self.sigma[0], self.sigma[1])
         x = x.filter(ImageFilter.GaussianBlur(radius=sigma))
         return x
+
+class FixedRandomRotation:
+    """Rotate by one of the given angles."""
+    def __init__(self, angles):
+        self.angles = angles
+
+    def __call__(self, x):
+        angle = random.choice(self.angles)
+        return transforms.functional.rotate(x, angle)
 
 
 def load_moco(base_encoder, args):
@@ -184,6 +194,107 @@ class CustomDataset(Dataset):
         else:
             return img, self.labels[index].long()
 
+def clean_data(img_dir, dataframe):
+    """ Clean the data """
+    for idx, row in dataframe.iterrows():
+        if not os.path.isfile(f'{img_dir}/{row.filename}'):
+            print(f"Removing non-existing file from dataset: {img_dir}/{row.filename}")
+            dataframe = dataframe.drop(idx)
+    return dataframe
+
+def get_dataframes(opt):
+    if os.path.isfile(opt.training_data_csv):
+        print("reading csv file: ", opt.training_data_csv)
+        train_df = pd.read_csv(opt.training_data_csv)
+    else:
+        raise Exception(f'Cannot find file: {opt.training_data_csv}')
+
+    if os.path.isfile(opt.test_data_csv):
+        print("reading csv file: ", opt.test_data_csv)
+        test_df = pd.read_csv(opt.test_data_csv)
+    else:
+        raise Exception(f'Cannot find file: {opt.test_data_csv}')
+
+    train_df = train_df.sample(100)
+    test_df = test_df.sample(100)
+
+    train_df = clean_data(opt.dataset_path, train_df)
+    test_df = clean_data(opt.dataset_path, test_df)
+
+
+    if opt.trainingset_split:
+        # Split train_df into train and val
+        slide_ids = train_df.slide_id.unique()
+        random.shuffle(slide_ids)
+        train_req_ids = []
+        valid_req_ids = []
+        # Take same number of slides from each site
+        training_size = int(len(slide_ids)*opt.trainingset_split)
+        validation_size = len(slide_ids) - training_size
+        train_req_ids.extend([slide_id for slide_id in slide_ids[:training_size]])  # take first
+        valid_req_ids.extend([
+            slide_id for slide_id in slide_ids[training_size:training_size+validation_size]])  # take last
+
+        print("train / valid / total")
+        print(f"{len(train_req_ids)} / {len(valid_req_ids)} / {len(slide_ids)}")
+
+        val_df = train_df[train_df.slide_id.isin(valid_req_ids)] # First, take the slides for validation
+        train_df = train_df[train_df.slide_id.isin(train_req_ids)] # Update train_df
+
+    else:
+        if os.path.isfile(opt.validation_data_csv):
+            print("reading csv file: ", opt.validation_data_csv)
+            val_df = pd.read_csv(opt.validation_data_csv)
+            val_df = val_df.sample(100)
+        else:
+            raise Exception(f'Cannot find file: {opt.test_data_csv}')
+
+    if opt.balanced_validation_set:
+        print('Use uniform validation set')
+        samples_to_take = val_df.groupby('label').size().min()
+        val_df = pd.concat([val_df[val_df.label == label].sample(samples_to_take) for label in val_df.label.unique()])
+
+        print('Use uniform test set')
+        samples_to_take = test_df.groupby('label').size().min()
+        test_df = pd.concat([test_df[test_df.label == label].sample(samples_to_take) for label in test_df.label.unique()])
+
+    return train_df, val_df, test_df
+
+
+class ImagePatchesDataset(Dataset):
+    def __init__(self, dataframe, image_dir, transform=None, two_crop=False):
+        self.dataframe = dataframe
+        self.image_dir = image_dir
+        self.transform = transform
+        self.two_crop = two_crop
+
+        self.label_enum = {'TUMOR': 1, 'NONTUMOR': 0}
+        self.labels = list(dataframe.label.apply(lambda x: self.label_enum[x]))
+
+    def __len__(self):
+        return len(self.dataframe.index)
+
+    def __getitem__(self, index):
+        row = self.dataframe.iloc[index]
+        path = f"{self.image_dir}/{row.filename}"
+        try:
+            image = Image.open(path)
+        except IOError:
+            print(f"could not open {path}")
+            return None
+
+        if self.transform is not None:
+            img = self.transform(image)
+            if self.two_crop:
+                img2 = self.transform(image)
+                img = torch.cat([img, img2], dim=0)
+        else:
+            raise NotImplementedError
+
+        label = self.label_enum[row.label]
+
+        return img, label, row.patch_id, row.slide_id
+
 
 def random_split_image_folder(data, labels, n_classes, n_samples_per_class):
     """ Creates a class-balanced validation set from a training set.
@@ -259,32 +370,32 @@ def experiment_config(parser, args):
     """ Handles experiment configuration and creates new dirs for model.
     """
     # check number of models already saved in 'experiments' dir, add 1 to get new model number
-    run_dir = os.path.join(os.path.split(os.getcwd())[0], 'experiments')
+    # run_dir = os.path.join(os.path.split(os.getcwd())[0], 'experiments')
 
-    os.makedirs(run_dir, exist_ok=True)
+    # os.makedirs(run_dir, exist_ok=True)
 
-    run_name = time.strftime("%Y-%m-%d_%H-%M-%S")
+    # run_name = time.strftime("%Y-%m-%d_%H-%M-%S")
 
     # create all save dirs
-    model_dir = os.path.join(run_dir, run_name)
+    args.model_dir = args.save_dir #os.path.join(run_dir, run_name)
 
-    os.makedirs(model_dir, exist_ok=True)
+    os.makedirs(args.model_dir , exist_ok=True)
 
-    args.summaries_dir = os.path.join(model_dir, 'summaries')
-    args.checkpoint_dir = os.path.join(model_dir, 'checkpoint.pt')
+    args.summaries_dir = os.path.join(args.model_dir, 'summaries')
+    args.checkpoint_dir = os.path.join(args.model_dir, 'checkpoint.pt')
 
-    if not args.finetune:
+    if not args.evaluate:
         args.load_checkpoint_dir = args.checkpoint_dir
 
     os.makedirs(args.summaries_dir, exist_ok=True)
 
     # save hyperparameters in .txt file
-    with open(os.path.join(model_dir, 'hyperparams.txt'), 'w') as logs:
+    with open(os.path.join(args.model_dir, 'hyperparams.txt'), 'w') as logs:
         for key, value in vars(args).items():
             logs.write('--{0}={1} \n'.format(str(key), str(value)))
 
     # save config file used in .txt file
-    with open(os.path.join(model_dir, 'config.txt'), 'w') as logs:
+    with open(os.path.join(args.model_dir, 'config.txt'), 'w') as logs:
         # Remove the string from the blur_sigma value list
         config = parser.format_values().replace("'", "")
         # Remove the first line, path to original config file
@@ -295,7 +406,7 @@ def experiment_config(parser, args):
     [logging.root.removeHandler(handler) for handler in logging.root.handlers[:]]
     # info logger for saving command line outputs during training
     logging.basicConfig(level=logging.INFO, format='%(message)s',
-                        handlers=[logging.FileHandler(os.path.join(model_dir, 'trainlogs.txt')),
+                        handlers=[logging.FileHandler(os.path.join(args.model_dir, 'trainlogs.txt')),
                                   logging.StreamHandler()])
     return args
 
@@ -308,16 +419,16 @@ def print_network(model, args):
     logging.info('-'*70)
 
     for param in model.state_dict():
-        p_name = param.split('.')[-2]+'.'+param.split('.')[-1]
+        # p_name = param.split('.')[-2]+'.'+param.split('.')[-1]
         # don't print batch norm layers for prettyness
-        if p_name[:2] != 'BN' and p_name[:2] != 'bn':
-            logging.info(
-                '{:>25} {:>27} {:>15}'.format(
-                    p_name,
-                    str(list(model.state_dict()[param].squeeze().size())),
-                    '{0:,}'.format(np.product(list(model.state_dict()[param].size())))
-                )
+        # if p_name[:2] != 'BN' and p_name[:2] != 'bn':
+        logging.info(
+            '{:>25} {:>27} {:>15}'.format(
+                param,
+                str(list(model.state_dict()[param].squeeze().size())),
+                '{0:,}'.format(np.product(list(model.state_dict()[param].size())))
             )
+        )
     logging.info('-'*70)
 
     logging.info('\nTotal params: {:,}\n\nSummaries dir: {}\n'.format(

@@ -128,10 +128,122 @@ def get_dataloaders(args):
 
         else:
             NotImplementedError('Please Select a path for the {} Dataset.'.format(args.dataset))
+    elif args.dataset == 'cam':
+        dataset = 'camelyon'
+
+        args.class_names = None
+        args.crop_dim = 224
+        args.n_channels, args.n_classes = 3, 2
+
+        dataset_paths = {'train': args.dataset_path,
+                          'test': args.dataset_path}
+
+        dataloaders = camelyon_dataloaders(args, dataset_paths)
     else:
         NotImplementedError('{} dataset not available.'.format(args.dataset))
 
     return dataloaders, args
+
+def camelyon_dataloaders(args, dataset_paths):
+    '''
+    Loads pathologydataset (formatted as Camelyon16/17)dataset, performing augmentaions.
+
+    Generates splits of the training set to produce a validation set.
+
+    args:
+        args (dict): Program/commandline arguments.
+
+        dataset_paths (dict): Paths to each datset split.
+
+    Returns:
+
+        dataloaders (): pretrain,train,valid,train_valid,test set split dataloaders.
+    '''
+    # guassian_blur from https://github.com/facebookresearch/moco/
+    guassian_blur = transforms.RandomApply([GaussianBlur(args.blur_sigma)], p=args.blur_p)
+
+    color_jitter = transforms.ColorJitter(
+        0.8*args.jitter_d, 0.8*args.jitter_d, 0.8*args.jitter_d, 0.2*args.jitter_d)
+    rnd_color_jitter = transforms.RandomApply([color_jitter], p=args.jitter_p)
+
+    rnd_grey = transforms.RandomGrayscale(p=args.grey_p)
+
+    # Base train and test augmentaions
+    transf = {
+        'train': transforms.Compose([
+            transforms.RandomResizedCrop((args.crop_dim, args.crop_dim)),
+            rnd_color_jitter,
+            rnd_grey,
+            guassian_blur,
+            FixedRandomRotation(angles=[0, 90, 180, 270]),
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomVerticalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize((0.485, 0.456, 0.406),
+                                 (0.229, 0.224, 0.225))]),
+        'test':  transforms.Compose([
+            transforms.CenterCrop((args.crop_dim, args.crop_dim)),
+            transforms.ToTensor(),
+            transforms.Normalize((0.485, 0.456, 0.406),
+                                 (0.229, 0.224, 0.225))])
+    }
+
+    train_df, val_df, test_df = get_dataframes(args)
+    print("training patches: ", train_df.groupby('label').size())
+    print("Validation patches: ", val_df.groupby('label').size())
+    print("Test patches: ", test_df.groupby('label').size())
+
+    print("Saving training/val set to file")
+    train_df.to_csv(f'{args.model_dir}/training_patches.csv', index=False)
+    val_df.to_csv(f'{args.model_dir}/val_patches.csv', index=False)
+
+    datasets = {}
+    datasets['pretrain'] = ImagePatchesDataset(dataframe=train_df,
+                        image_dir=args.dataset_path,
+                        transform=transf['train'],
+                        two_crop=args.twocrop)
+
+    # Finetuning train
+    datasets['train'] = ImagePatchesDataset(dataframe=train_df,
+                        image_dir=args.dataset_path,
+                        transform=transf['train'],
+                        two_crop=False)
+
+    datasets['valid'] = ImagePatchesDataset(dataframe=val_df,
+                        image_dir=args.dataset_path,
+                        transform=transf['test'],
+                        two_crop=False)
+
+    datasets['test'] = ImagePatchesDataset(dataframe=test_df,
+                            image_dir=args.dataset_path,
+                            transform=transf['test'],
+                            two_crop=False)
+
+
+
+    # weighted sampler weights for new training set
+    s_weights = sample_weights(datasets['pretrain'].labels)
+
+    config = {
+        'pretrain': None,
+        'train': WeightedRandomSampler(s_weights,
+                                       num_samples=len(s_weights), replacement=True),
+        'valid': None,
+        'test': None
+    }
+
+    if args.distributed:
+        config = {'pretrain': DistributedSampler(datasets['pretrain']),
+                  'train': DistributedSampler(datasets['train']),
+                  'valid': None,
+                  'test': None}
+
+    dataloaders = {i: DataLoader(datasets[i], sampler=config[i],
+                                 num_workers=args.num_workers,
+                                 pin_memory=True, drop_last=True,
+                                 batch_size=args.batch_size) for i in config.keys()}
+
+    return dataloaders
 
 
 def imagenet_dataloader(args, dataset_paths):
@@ -452,7 +564,7 @@ def cifar_dataloader(args, dataset_paths):
                   'valid': None, 'test': None}
 
     dataloaders = {i: DataLoader(datasets[i], sampler=config[i],
-                                 num_workers=8, pin_memory=True, drop_last=True,
+                                 num_workers=0, pin_memory=True, drop_last=True,
                                  batch_size=args.batch_size) for i in config.keys()}
 
     return dataloaders

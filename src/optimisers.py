@@ -48,8 +48,8 @@ def get_optimiser(models, mode, args):
         lr = args.learning_rate
         wd = args.weight_decay
     else:
-        lr = args.finetune_learning_rate
-        wd = args.finetune_weight_decay
+        lr = args.evaluate_learning_rate
+        wd = args.evaluate_weight_decay
 
     # Select Optimiser
     if args.optimiser == 'adam':

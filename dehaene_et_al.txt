@@ -1,0 +1,16 @@
+Settings for reproducing Dehaene et al (2020)
+
+ResNet50
+Image size 224x224
+Epochs 200
+Using 0.5, i.e., 20x
+in paper: batch-size 4096 over 16 GPUs = not doable, let's use same as SimCLR,
+batch-size (total) 512, over 4 GPUs (128 per GPUs)
+
+LARS optimizer, lr 0.2
+
+Augmentations:
+Same as v2, plus:
+RandomVerticalFlip()
+RandomRotation [0, 90, 180, 270] (p=0.25)
+ColorJitter(0.8, 0.8, 0.8, 0.2)

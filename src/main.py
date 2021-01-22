@@ -17,6 +17,7 @@ from utils import *
 import model.network as models
 from model.moco import MoCo_Model
 
+import neptune
 
 warnings.filterwarnings("ignore")
 
@@ -28,7 +29,7 @@ parser = configargparse.ArgumentParser(
 parser.add_argument('-c', '--my-config', required=False,
                     is_config_file=True, help='config file path')
 parser.add_argument('--dataset', default='cifar10',
-                    help='Dataset, (Options: cifar10, cifar100, stl10, imagenet, tinyimagenet).')
+                    help='Dataset, (Options: cifar10, cifar100, stl10, imagenet, tinyimagenet, cam).')
 parser.add_argument('--dataset_path', default=None,
                     help='Path to dataset, Not needed for TorchVision Datasets.')
 parser.add_argument('--model', default='resnet18',
@@ -45,12 +46,14 @@ parser.add_argument('--learning_rate', type=float, default=1.0,
                     help='Starting Learing Rate for Contrastive Training.')
 parser.add_argument('--base_lr', type=float, default=0.0001,
                     help='Base / Minimum Learing Rate to Begin Linear Warmup.')
-parser.add_argument('--finetune_learning_rate', type=float, default=0.1,
+
+parser.add_argument('--evaluate_learning_rate', type=float, default=0.1,
                     help='Starting Learing Rate for Linear Classification Training.')
 parser.add_argument('--weight_decay', type=float, default=1e-6,
                     help='Contrastive Learning Weight Decay Regularisation Factor.')
-parser.add_argument('--finetune_weight_decay', type=float, default=0.0,
+parser.add_argument('--evaluate_weight_decay', type=float, default=0.0,
                     help='Linear Classification Training Weight Decay Regularisation Factor.')
+
 parser.add_argument('--optimiser', default='sgd',
                     help='Optimiser, (Options: sgd, adam, lars).')
 parser.add_argument('--patience', default=50, type=int,
@@ -79,13 +82,31 @@ parser.add_argument('--load_checkpoint_dir', default=None,
 parser.add_argument('--no_distributed', dest='distributed', action='store_false',
                     help='Whether or Not to Use Distributed Training. (Default: True)')
 parser.set_defaults(distributed=True)
+
+parser.add_argument('--pretrain', dest='pretrain', action='store_true',
+                    default=False, help='Train MoCo unsupervised. (Default: False)')
+parser.add_argument('--evaluate', dest='evaluate', action='store_true',
+                    default=False, help='Linear Classification Training. (Default: False)')
 parser.add_argument('--finetune', dest='finetune', action='store_true',
-                    help='Perform Only Linear Classification Training. (Default: False)')
+                    help='No not freeze pretrained weights, do Linear Classification Training. (Default: False)')
 parser.set_defaults(finetune=False)
+
 parser.add_argument('--supervised', dest='supervised', action='store_true',
                     help='Perform Supervised Pre-Training. (Default: False)')
 parser.set_defaults(supervised=False)
 
+# CAMELYON parameters
+parser.add_argument('--training_data_csv', required=True, type=str, help='Path to file to use to read training data')
+parser.add_argument('--test_data_csv', required=True, type=str, help='Path to file to use to read test data')
+# For validation set, need to specify either csv or train/val split ratio
+group_validationset = parser.add_mutually_exclusive_group(required=True)
+group_validationset.add_argument('--validation_data_csv', type=str, help='Path to file to use to read validation data')
+group_validationset.add_argument('--trainingset_split', type=float, help='If not none, training csv with be split in train/val. Value between 0-1')
+parser.add_argument("--balanced_validation_set", action="store_true", default=False, help="Equal size of classes in validation AND test set",)
+
+parser.add_argument('--save_dir', type=str, help='Path to save log')
+parser.add_argument('--save_after', type=int, default=1, help='Save model after every Nth epoch, default every epoch')
+parser.add_argument('--num_workers', type=int, default=16)
 
 def setup(distributed):
     """ Sets up for optional distributed training.
@@ -137,6 +158,7 @@ def setup(distributed):
 
 def main():
     """ Main """
+    neptune.init('k-stacke/sandbox')
 
     # Arguments
     args = parser.parse_args()
@@ -144,11 +166,16 @@ def main():
     # Setup Distributed Training
     device, local_rank = setup(distributed=args.distributed)
 
+    # Setup logging, saving models, summaries
+    args = experiment_config(parser, args)
+
     # Get Dataloaders for Dataset of choice
     dataloaders, args = get_dataloaders(args)
 
-    # Setup logging, saving models, summaries
-    args = experiment_config(parser, args)
+    # Neputne tags based on settinfgs
+    tags = {'moco': True, 'linear': args.evaluate, 'finetune': args.finetune}
+    tags = [key for key, val in tags.items() if val]
+    exp = neptune.create_experiment(name='MoCo', params=args.__dict__, tags=tags)
 
     ''' Base Encoder '''
 
@@ -211,55 +238,61 @@ def main():
             len(dataloaders['test'].dataset)))
 
     # launch model training or inference
-    if not args.finetune:
+    if args.pretrain:
+        # Pretrain the encoder and projection head
+        pretrain(moco, dataloaders, args, exp)
 
-        ''' Pretraining / Finetuning / Evaluate '''
-
-        if not args.supervised:
-            # Pretrain the encoder and projection head
-            pretrain(moco, dataloaders, args)
-
-            # Load the state_dict from query encoder and load it on finetune net
-            base_encoder = load_moco(base_encoder, args)
-
-        else:
-            supervised(base_encoder, dataloaders, args)
-
-            # Load the state_dict from query encoder and load it on finetune net
-            base_encoder = load_sup(base_encoder, args)
-
-        # Supervised Finetuning of the supervised classification head
-        finetune(base_encoder, dataloaders, args)
-
-        # Evaluate the pretrained model and trained supervised head
-        test_loss, test_acc, test_acc_top5 = evaluate(
-            base_encoder, dataloaders, 'test', args.finetune_epochs, args)
-
-        print('[Test] loss {:.4f} - acc {:.4f} - acc_top5 {:.4f}'.format(
-            test_loss, test_acc, test_acc_top5))
-
-        if args.distributed:  # cleanup
-            torch.distributed.destroy_process_group()
-    else:
-
-        ''' Finetuning / Evaluate '''
-
-        # Do not Pretrain, just finetune and inference
-        # Load the state_dict from query encoder and load it on finetune net
+    if args.evaluate:
+        # Load pretrained model, freeze layers
+        # base encoder is resnet model backbones
         base_encoder = load_moco(base_encoder, args)
 
+        if args.finetune:
+            # Retrain the entire network
+            base_encoder.requires_grad = True
+        else:
+            # Make sure only fc layers are trained
+            # freeze all layers but the last fc
+            for name, param in base_encoder.named_parameters():
+                if name not in ['fc.weight', 'fc.bias']:
+                    param.requires_grad = False
+            # init the fc layer
+            init_weights(base_encoder)
+
         # Supervised Finetuning of the supervised classification head
-        finetune(base_encoder, dataloaders, args)
+        finetune(base_encoder, dataloaders, args, exp)
 
         # Evaluate the pretrained model and trained supervised head
-        test_loss, test_acc, test_acc_top5 = evaluate(
-            base_encoder, dataloaders, 'test', args.finetune_epochs, args)
+        test_loss, test_acc, test_acc_top5, df = evaluate(
+            base_encoder, dataloaders, 'test', args.finetune_epochs, args, exp)
 
         print('[Test] loss {:.4f} - acc {:.4f} - acc_top5 {:.4f}'.format(
             test_loss, test_acc, test_acc_top5))
 
+        df.to_csv(f"{args.model_dir}/inference_result_model.csv")
+
         if args.distributed:  # cleanup
             torch.distributed.destroy_process_group()
+    # else:
+
+    #     ''' Finetuning / Evaluate '''
+
+    #     # Do not Pretrain, just finetune and inference
+    #     # Load the state_dict from query encoder and load it on finetune net
+    #     base_encoder = load_moco(base_encoder, args)
+
+    #     # Supervised Finetuning of the supervised classification head
+    #     finetune(base_encoder, dataloaders, args)
+
+    #     # Evaluate the pretrained model and trained supervised head
+    #     test_loss, test_acc, test_acc_top5 = evaluate(
+    #         base_encoder, dataloaders, 'test', args.finetune_epochs, args)
+
+    #     print('[Test] loss {:.4f} - acc {:.4f} - acc_top5 {:.4f}'.format(
+    #         test_loss, test_acc, test_acc_top5))
+
+    #     if args.distributed:  # cleanup
+    #         torch.distributed.destroy_process_group()
 
 
 if __name__ == '__main__':

@@ -4,18 +4,19 @@ import gc
 import logging
 import numpy as np
 from tqdm import tqdm
+import pandas as pd
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
 import torch.nn.functional as F
-from torch.utils.tensorboard import SummaryWriter
+# from torch.utils.tensorboard import SummaryWriter
 from optimisers import get_optimiser
 from PIL import Image
 
 
-def pretrain(encoder, dataloaders, args):
+def pretrain(encoder, dataloaders, args, exp):
     ''' Pretrain script - MoCo
 
         Pretrain the encoder and projection head with a Contrastive InfoNCE Loss.
@@ -42,13 +43,12 @@ def pretrain(encoder, dataloaders, args):
     criterion = nn.CrossEntropyLoss().cuda()
 
     # initilize Variables
-    args.writer = SummaryWriter(args.summaries_dir)
+    # args.writer = SummaryWriter(args.summaries_dir)
     best_valid_loss = np.inf
     patience_counter = 0
 
     ''' Pretrain loop '''
     for epoch in range(args.n_epochs):
-
         # Train models
         encoder.train()
 
@@ -64,7 +64,8 @@ def pretrain(encoder, dataloaders, args):
             train_dataloader = dataloaders['pretrain']
 
         ''' epoch loop '''
-        for i, (inputs, _) in enumerate(train_dataloader):
+        for i, data in enumerate(train_dataloader):
+            inputs = data[0]
 
             inputs = inputs.cuda(non_blocking=True)
 
@@ -89,7 +90,7 @@ def pretrain(encoder, dataloaders, args):
 
             run_loss += loss.item()
 
-        epoch_pretrain_loss = run_loss / len(dataloaders['pretrain'])
+        epoch_pretrain_loss = run_loss / len(dataloaders['pretrain'].dataset)
 
         ''' Update Schedulers '''
         # TODO: Improve / add lr_scheduler for warmup
@@ -105,36 +106,54 @@ def pretrain(encoder, dataloaders, args):
         ''' Printing '''
         if args.print_progress:  # only validate using process 0
             logging.info('\n[Train] loss: {:.4f}'.format(epoch_pretrain_loss))
+            exp.log_metric('epoch_loss', epoch_pretrain_loss)
+            exp.log_metric('learning_rate', optimiser.param_groups[0]['lr'])
+            # args.writer.add_scalars('epoch_loss', {'pretrain': epoch_pretrain_loss}, epoch+1)
+            # args.writer.add_scalars('lr', {'pretrain': optimiser.param_groups[0]['lr']}, epoch+1)
 
-            args.writer.add_scalars('epoch_loss', {'pretrain': epoch_pretrain_loss}, epoch+1)
-            args.writer.add_scalars('lr', {'pretrain': optimiser.param_groups[0]['lr']}, epoch+1)
-
-        # For the best performing epoch, reset patience and save model,
-        # else update patience.
-        if epoch_pretrain_loss <= best_valid_loss:
-            patience_counter = 0
-            best_epoch = epoch + 1
-            best_valid_loss = epoch_pretrain_loss
-
-            # saving using process (rank) 0 only as all processes are in sync
-
+        ## Save model
+        if epoch % args.save_after == 0:
             state = {
                 #'args': args,
                 'moco': encoder.state_dict(),
                 'optimiser': optimiser.state_dict(),
                 'epoch': epoch,
             }
+            torch.save(state, f'{args.model_dir}/moco_model_{epoch}.pt')
+            args.load_checkpoint_dir = f'{args.model_dir}/moco_model_{epoch}.pt'
+        # Delete old ones, save latest, keep every 10th
+        if (epoch - 1) % 10 != 0:
+            try:
+                os.remove(f'{args.model_dir}/moco_model_{epoch - 1}.pt')
+            except:
+                print("not enough models there yet, nothing to delete")
 
-            torch.save(state, args.checkpoint_dir)
-        else:
-            patience_counter += 1
-            if patience_counter == (args.patience - 10):
-                logging.info('\nPatience counter {}/{}.'.format(
-                    patience_counter, args.patience))
-            elif patience_counter == args.patience:
-                logging.info('\nEarly stopping... no improvement after {} Epochs.'.format(
-                    args.patience))
-                break
+        # # For the best performing epoch, reset patience and save model,
+        # # else update patience.
+        # if epoch_pretrain_loss <= best_valid_loss:
+        #     patience_counter = 0
+        #     best_epoch = epoch + 1
+        #     best_valid_loss = epoch_pretrain_loss
+
+        #     # saving using process (rank) 0 only as all processes are in sync
+
+        #     state = {
+        #         #'args': args,
+        #         'moco': encoder.state_dict(),
+        #         'optimiser': optimiser.state_dict(),
+        #         'epoch': epoch,
+        #     }
+
+        #     torch.save(state, args.checkpoint_dir)
+        # else:
+        #     patience_counter += 1
+        #     if patience_counter == (args.patience - 10):
+        #         logging.info('\nPatience counter {}/{}.'.format(
+        #             patience_counter, args.patience))
+        #     elif patience_counter == args.patience:
+        #         logging.info('\nEarly stopping... no improvement after {} Epochs.'.format(
+        #             args.patience))
+        #         break
 
         epoch_pretrain_loss = None  # reset loss
 
@@ -145,7 +164,7 @@ def pretrain(encoder, dataloaders, args):
     gc.collect()  # release unreferenced memory
 
 
-def supervised(encoder, dataloaders, args):
+def supervised(encoder, dataloaders, args,):
     ''' Supervised Train script - MoCo
 
         Supervised Training encoder and train the supervised classification head with a Cross Entropy Loss.
@@ -174,7 +193,7 @@ def supervised(encoder, dataloaders, args):
     criterion = torch.nn.CrossEntropyLoss().cuda()
 
     # initilize Variables
-    args.writer = SummaryWriter(args.summaries_dir)
+    # args.writer = SummaryWriter(args.summaries_dir)
     best_valid_loss = np.inf
     patience_counter = 0
 
@@ -198,11 +217,12 @@ def supervised(encoder, dataloaders, args):
             train_dataloader = dataloaders['train']
 
         ''' epoch loop '''
-        for i, (inputs, target) in enumerate(train_dataloader):
+        for i, data in enumerate(train_dataloader):
 
-            inputs = inputs.cuda(non_blocking=True)
 
-            target = target.cuda(non_blocking=True)
+            inputs = data[0].cuda(non_blocking=True)
+
+            target = data[1].cuda(non_blocking=True)
 
             # Forward pass
             optimiser.zero_grad()
@@ -227,18 +247,19 @@ def supervised(encoder, dataloaders, args):
 
             run_top1 += acc
 
-            _, output_topk = output.topk(5, 1, True, True)
+            if args.n_classes > 5:
+                _, output_topk = output.topk(5, 1, True, True)
 
-            acc_top5 = (output_topk == target.view(-1, 1).expand_as(output_topk)
-                        ).sum().item() / target.size(0)  # num corrects
+                acc_top5 = (output_topk == target.view(-1, 1).expand_as(output_topk)
+                            ).sum().item() / target.size(0)  # num corrects
 
-            run_top5 += acc_top5
+                run_top5 += acc_top5
 
-        epoch_pretrain_loss = run_loss / len(dataloaders['train'])  # sample_count
+        epoch_pretrain_loss = run_loss / sample_count # len(dataloaders['train'])
 
-        epoch_pretrain_acc = run_top1 / len(dataloaders['train'])
+        epoch_pretrain_acc = run_top1 / sample_count # len(dataloaders['train'])
 
-        epoch_pretrain_acc_top5 = run_top5 / len(dataloaders['train'])
+        epoch_pretrain_acc_top5 = run_top5 / sample_count # len(dataloaders['train'])
 
         ''' Update Schedulers '''
         # TODO: Improve / add lr_scheduler for warmup
@@ -255,14 +276,14 @@ def supervised(encoder, dataloaders, args):
         if args.print_progress:  # only validate using process 0
             logging.info('\n[Train] loss: {:.4f}'.format(epoch_pretrain_loss))
 
-            args.writer.add_scalars('epoch_loss', {
-                                    'pretrain': epoch_pretrain_loss}, epoch+1)
-            args.writer.add_scalars('supervised_epoch_acc', {
-                                    'pretrain': epoch_pretrain_acc}, epoch+1)
-            args.writer.add_scalars('supervised_epoch_acc_top5', {
-                                    'pretrain': epoch_pretrain_acc_top5}, epoch+1)
-            args.writer.add_scalars('epoch_loss', {'pretrain': epoch_pretrain_loss}, epoch+1)
-            args.writer.add_scalars('lr', {'pretrain': optimiser.param_groups[0]['lr']}, epoch+1)
+            # args.writer.add_scalars('epoch_loss', {
+            #                         'pretrain': epoch_pretrain_loss}, epoch+1)
+            # args.writer.add_scalars('supervised_epoch_acc', {
+            #                         'pretrain': epoch_pretrain_acc}, epoch+1)
+            # args.writer.add_scalars('supervised_epoch_acc_top5', {
+            #                         'pretrain': epoch_pretrain_acc_top5}, epoch+1)
+            # args.writer.add_scalars('epoch_loss', {'pretrain': epoch_pretrain_loss}, epoch+1)
+            # args.writer.add_scalars('lr', {'pretrain': optimiser.param_groups[0]['lr']}, epoch+1)
 
         # For the best performing epoch, reset patience and save model,
         # else update patience.
@@ -300,7 +321,7 @@ def supervised(encoder, dataloaders, args):
     gc.collect()  # release unreferenced memory
 
 
-def finetune(encoder, dataloaders, args):
+def finetune(encoder, dataloaders, args, exp):
     ''' Finetune script - MoCo
 
         Freeze the encoder and train the supervised Linear Evaluation head with a Cross Entropy Loss.
@@ -320,14 +341,13 @@ def finetune(encoder, dataloaders, args):
     criterion = torch.nn.CrossEntropyLoss().cuda()
 
     # initilize Variables
-    args.writer = SummaryWriter(args.summaries_dir)
+    # args.writer = SummaryWriter(args.summaries_dir)
     best_valid_loss = np.inf
     best_valid_acc = 0.0
     patience_counter = 0
 
     ''' Pretrain loop '''
     for epoch in range(args.finetune_epochs):
-
         # Freeze the encoder, train classification head
         encoder.eval()
 
@@ -345,11 +365,11 @@ def finetune(encoder, dataloaders, args):
             train_dataloader = dataloaders['train']
 
         ''' epoch loop '''
-        for i, (inputs, target) in enumerate(train_dataloader):
+        for i, data in enumerate(train_dataloader):
 
-            inputs = inputs.cuda(non_blocking=True)
+            inputs = data[0].cuda(non_blocking=True)
 
-            target = target.cuda(non_blocking=True)
+            target = data[1].cuda(non_blocking=True)
 
             # Forward pass
             optimiser.zero_grad()
@@ -376,18 +396,19 @@ def finetune(encoder, dataloaders, args):
 
             run_top1 += acc
 
-            _, output_topk = output.topk(5, 1, True, True)
+            if args.n_classes > 5:
+                _, output_topk = output.topk(5, 1, True, True)
 
-            acc_top5 = (output_topk == target.view(-1, 1).expand_as(output_topk)
-                        ).sum().item() / target.size(0)  # num corrects
+                acc_top5 = (output_topk == target.view(-1, 1).expand_as(output_topk)
+                            ).sum().item() / target.size(0)  # num corrects
 
-            run_top5 += acc_top5
+                run_top5 += acc_top5
 
-        epoch_finetune_loss = run_loss / len(dataloaders['train'])  # sample_count
+        epoch_finetune_loss = run_loss / sample_count #len(dataloaders['train'])
 
-        epoch_finetune_acc = run_top1 / len(dataloaders['train'])
+        epoch_finetune_acc = run_top1 / sample_count #len(dataloaders['train'])
 
-        epoch_finetune_acc_top5 = run_top5 / len(dataloaders['train'])
+        epoch_finetune_acc_top5 = run_top5 / sample_count # len(dataloaders['train'])
 
         ''' Update Schedulers '''
         # Decay lr with CosineAnnealingLR
@@ -398,42 +419,63 @@ def finetune(encoder, dataloaders, args):
             logging.info('\n[Finetune] loss: {:.4f},\t acc: {:.4f}, \t acc_top5: {:.4f}\n'.format(
                 epoch_finetune_loss, epoch_finetune_acc, epoch_finetune_acc_top5))
 
-            args.writer.add_scalars('finetune_epoch_loss', {'train': epoch_finetune_loss}, epoch+1)
-            args.writer.add_scalars('finetune_epoch_acc', {'train': epoch_finetune_acc}, epoch+1)
-            args.writer.add_scalars('finetune_epoch_acc_top5', {
-                                    'train': epoch_finetune_acc_top5}, epoch+1)
-            args.writer.add_scalars(
-                'finetune_lr', {'train': optimiser.param_groups[0]['lr']}, epoch+1)
+            exp.log_metric('epoch_finetune_loss', epoch_finetune_loss)
+            exp.log_metric('epoch_finetune_acc', epoch_finetune_acc)
+            exp.log_metric('learning_rate', optimiser.param_groups[0]['lr'])
+            # args.writer.add_scalars('finetune_epoch_loss', {'train': epoch_finetune_loss}, epoch+1)
+            # args.writer.add_scalars('finetune_epoch_acc', {'train': epoch_finetune_acc}, epoch+1)
+            # args.writer.add_scalars('finetune_epoch_acc_top5', {
+            #                         'train': epoch_finetune_acc_top5}, epoch+1)
+            # args.writer.add_scalars(
+            #     'finetune_lr', {'train': optimiser.param_groups[0]['lr']}, epoch+1)
 
-        valid_loss, valid_acc, valid_acc_top5 = evaluate(
+        valid_loss, valid_acc, valid_acc_top5, _ = evaluate(
             encoder, dataloaders, 'valid', epoch, args)
 
-        # For the best performing epoch, reset patience and save model,
-        # else update patience.
-        if valid_acc >= best_valid_acc:
-            patience_counter = 0
-            best_epoch = epoch + 1
-            best_valid_acc = valid_acc
 
-            # saving using process (rank) 0 only as all processes are in sync
-
+        ## Save model
+        if epoch % args.save_after == 0:
             state = {
                 #'args': args,
-                'base_encoder': encoder.state_dict(),
+                'moco': encoder.state_dict(),
                 'optimiser': optimiser.state_dict(),
-                'epoch': epoch
+                'epoch': epoch,
             }
+            torch.save(state, f'{args.model_dir}/moco_model_{epoch}_linear.pt')
+            args.load_checkpoint_dir = f'{args.model_dir}/moco_model_{epoch}_linear.pt'
+        # Delete old ones, save latest, keep every 10th
+        if (epoch - 1) % 10 != 0:
+            try:
+                os.remove(f'{args.model_dir}/moco_model_{epoch - 1}_linear.pt')
+            except:
+                print("not enough models there yet, nothing to delete")
 
-            torch.save(state, (args.checkpoint_dir[:-3] + "_finetune.pt"))
-        else:
-            patience_counter += 1
-            if patience_counter == (args.patience - 10):
-                logging.info('\nPatience counter {}/{}.'.format(
-                    patience_counter, args.patience))
-            elif patience_counter == args.patience:
-                logging.info('\nEarly stopping... no improvement after {} Epochs.'.format(
-                    args.patience))
-                break
+        # # For the best performing epoch, reset patience and save model,
+        # # else update patience.
+        # if valid_acc >= best_valid_acc:
+        #     patience_counter = 0
+        #     best_epoch = epoch + 1
+        #     best_valid_acc = valid_acc
+
+        #     # saving using process (rank) 0 only as all processes are in sync
+
+        #     state = {
+        #         #'args': args,
+        #         'base_encoder': encoder.state_dict(),
+        #         'optimiser': optimiser.state_dict(),
+        #         'epoch': epoch
+        #     }
+
+        #     torch.save(state, (args.checkpoint_dir[:-3] + "_finetune.pt"))
+        # else:
+        #     patience_counter += 1
+        #     if patience_counter == (args.patience - 10):
+        #         logging.info('\nPatience counter {}/{}.'.format(
+        #             patience_counter, args.patience))
+        #     elif patience_counter == args.patience:
+        #         logging.info('\nEarly stopping... no improvement after {} Epochs.'.format(
+        #             args.patience))
+        #         break
 
         epoch_finetune_loss = None  # reset loss
         epoch_finetune_acc = None
@@ -446,7 +488,7 @@ def finetune(encoder, dataloaders, args):
     gc.collect()  # release unreferenced memory
 
 
-def evaluate(encoder, dataloaders, mode, epoch, args):
+def evaluate(encoder, dataloaders, mode, epoch, args, exp):
     ''' Evaluate script - MoCo
 
         Evaluate the encoder and Linear Evaluation head with Cross Entropy loss.
@@ -460,7 +502,7 @@ def evaluate(encoder, dataloaders, mode, epoch, args):
     criterion = nn.CrossEntropyLoss().cuda()
 
     # initilize Variables
-    args.writer = SummaryWriter(args.summaries_dir)
+    # args.writer = SummaryWriter(args.summaries_dir)
 
     # Evaluate both encoder and class head
     encoder.eval()
@@ -471,6 +513,7 @@ def evaluate(encoder, dataloaders, mode, epoch, args):
     run_top1 = 0.0
     run_top5 = 0.0
 
+    all_preds, all_labels, all_slides, all_outputs0, all_outputs1, all_patches  = [], [], [], [], [], []
     # Print setup for distributed only printing on one node.
     if args.print_progress:
             # tqdm for process (rank) 0 only when using distributed training
@@ -479,45 +522,51 @@ def evaluate(encoder, dataloaders, mode, epoch, args):
         eval_dataloader = dataloaders[mode]
 
     ''' epoch loop '''
-    for i, (inputs, target) in enumerate(eval_dataloader):
+    for i, data in enumerate(eval_dataloader):
 
         # Do not compute gradient for encoder and classification head
         encoder.zero_grad()
 
-        inputs = inputs.cuda(non_blocking=True)
+        inputs = data[0].cuda(non_blocking=True)
 
-        target = target.cuda(non_blocking=True)
+        target = data[1].cuda(non_blocking=True)
 
         # Forward pass
 
         output = encoder(inputs)
-
         loss = criterion(output, target)
 
         torch.cuda.synchronize()
-
         sample_count += inputs.size(0)
-
         run_loss += loss.item()
 
         predicted = output.argmax(-1)
-
         acc = (predicted == target).sum().item() / target.size(0)
-
         run_top1 += acc
 
-        _, output_topk = output.topk(5, 1, True, True)
+        all_preds.extend(predicted.cpu().numpy())
+        all_labels.extend(target.cpu().data.numpy())
+        if args.dataset == 'cam':
+            all_patches.extend(data[2])
+            all_slides.extend(data[3])
 
-        acc_top5 = (output_topk == target.view(-1, 1).expand_as(output_topk)
-                    ).sum().item() / target.size(0)  # num corrects
+        probs = torch.nn.functional.softmax(output.data, dim=1).cpu().numpy()
+        all_outputs0.extend(probs[:, 0])
+        all_outputs1.extend(probs[:, 1])
 
-        run_top5 += acc_top5
+        if args.n_classes > 5:
+            _, output_topk = output.topk(5, 1, True, True)
 
-    epoch_valid_loss = run_loss / len(dataloaders[mode])  # sample_count
+            acc_top5 = (output_topk == target.view(-1, 1).expand_as(output_topk)
+                        ).sum().item() / target.size(0)  # num corrects
 
-    epoch_valid_acc = run_top1 / len(dataloaders[mode])
+            run_top5 += acc_top5
 
-    epoch_valid_acc_top5 = run_top5 / len(dataloaders[mode])
+    epoch_valid_loss = run_loss / sample_count
+
+    epoch_valid_acc = run_top1 / sample_count #len(dataloaders[mode])
+
+    epoch_valid_acc_top5 = run_top5 / sample_count #len(dataloaders[mode])
 
     ''' Printing '''
     if args.print_progress:  # only validate using process 0
@@ -525,13 +574,24 @@ def evaluate(encoder, dataloaders, mode, epoch, args):
             mode, epoch_valid_loss, epoch_valid_acc, epoch_valid_acc_top5))
 
         if mode != 'test':
-            args.writer.add_scalars('finetune_epoch_loss', {mode: epoch_valid_loss}, epoch+1)
-            args.writer.add_scalars('finetune_epoch_acc', {mode: epoch_valid_acc}, epoch+1)
-            args.writer.add_scalars('finetune_epoch_acc_top5', {
-                                    'train': epoch_valid_acc_top5}, epoch+1)
+            exp.log_metric('epoch_valid_loss', epoch_valid_loss)
+            exp.log_metric('epoch_valid_acc', epoch_valid_acc)
+        #     args.writer.add_scalars('finetune_epoch_loss', {mode: epoch_valid_loss}, epoch+1)
+        #     args.writer.add_scalars('finetune_epoch_acc', {mode: epoch_valid_acc}, epoch+1)
+        #     args.writer.add_scalars('finetune_epoch_acc_top5', {
+        #                             'train': epoch_valid_acc_top5}, epoch+1)
 
     torch.cuda.empty_cache()
 
     gc.collect()  # release unreferenced memory
 
-    return epoch_valid_loss, epoch_valid_acc, epoch_valid_acc_top5
+    df =  pd.DataFrame({
+                'label': all_labels,
+                'prediction': all_preds,
+                'slide_id': all_slides,
+                'patch_id': all_patches,
+                'probabilities_0': all_outputs0,
+                'probabilities_1': all_outputs1,
+            })
+
+    return epoch_valid_loss, epoch_valid_acc, epoch_valid_acc_top5, df
