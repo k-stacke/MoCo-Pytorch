@@ -97,10 +97,10 @@ parser.add_argument('--supervised', dest='supervised', action='store_true',
 parser.set_defaults(supervised=False)
 
 # CAMELYON parameters
-parser.add_argument('--training_data_csv', required=True, type=str, help='Path to file to use to read training data')
-parser.add_argument('--test_data_csv', required=True, type=str, help='Path to file to use to read test data')
+parser.add_argument('--training_data_csv', required=False, type=str, help='Path to file to use to read training data')
+parser.add_argument('--test_data_csv', required=False, type=str, help='Path to file to use to read test data')
 # For validation set, need to specify either csv or train/val split ratio
-group_validationset = parser.add_mutually_exclusive_group(required=True)
+group_validationset = parser.add_mutually_exclusive_group(required=False)
 group_validationset.add_argument('--validation_data_csv', type=str, help='Path to file to use to read validation data')
 group_validationset.add_argument('--trainingset_split', type=float, help='If not none, training csv with be split in train/val. Value between 0-1')
 parser.add_argument("--balanced_validation_set", action="store_true", default=False, help="Equal size of classes in validation AND test set",)
@@ -235,11 +235,12 @@ def main():
         args.print_progress = True
 
     # Print Network Structure and Params
-    if args.print_progress:
-        print_network(moco, args)  # prints out the network architecture etc
-        logging.info('\npretrain/train: {} - valid: {} - test: {}'.format(
-            len(dataloaders['train'].dataset), len(dataloaders['valid'].dataset),
-            len(dataloaders['test'].dataset)))
+    # if args.print_progress:
+    #     print_network(moco, args)  # prints out the network architecture etc
+    #     logging.info(f"\npretrain/train: {len(dataloaders['pretrain'].dataset)}" \
+    #                  f" - valid {len(dataloaders['valid'].dataset) if dataloaders['valid'] is not None else None}" \
+    #                  f" - test {len(dataloaders['test'].dataset) if dataloaders['test'] is not None else None}")
+
 
     # launch model training or inference
     if args.pretrain:

@@ -16,15 +16,12 @@ from utils import *
 def get_dataloaders(args):
     '''
     Retrives the dataloaders for the dataset of choice.
-
     Initalise variables that correspond to the dataset of choice.
 
     args:
         args (dict): Program arguments/commandline arguments.
-
     returns:
         dataloaders (dict): pretrain,train,valid,train_valid,test set split dataloaders.
-
         args (dict): Updated and Additional program/commandline arguments dependent on dataset.
 
     '''
@@ -139,6 +136,14 @@ def get_dataloaders(args):
                           'test': args.dataset_path}
 
         dataloaders = camelyon_dataloaders(args, dataset_paths)
+    elif args.dataset == 'multidata':
+
+        args.class_names = None
+        args.crop_dim = 224
+        args.n_classes, args.n_classes = 3,2
+        dataset_paths = {'train', args.dataset_path}
+
+        dataloaders = multidata_dataloaders(args, dataset_paths)
     else:
         NotImplementedError('{} dataset not available.'.format(args.dataset))
 
@@ -147,16 +152,11 @@ def get_dataloaders(args):
 def camelyon_dataloaders(args, dataset_paths):
     '''
     Loads pathologydataset (formatted as Camelyon16/17)dataset, performing augmentaions.
-
     Generates splits of the training set to produce a validation set.
-
     args:
         args (dict): Program/commandline arguments.
-
         dataset_paths (dict): Paths to each datset split.
-
     Returns:
-
         dataloaders (): pretrain,train,valid,train_valid,test set split dataloaders.
     '''
     # guassian_blur from https://github.com/facebookresearch/moco/
@@ -244,6 +244,56 @@ def camelyon_dataloaders(args, dataset_paths):
                                  batch_size=args.batch_size) for i in config.keys()}
 
     return dataloaders
+
+
+def multidata_dataloaders(args, dataset_paths):
+    '''
+    Loads pathologydataset from lmdb files, performing augmentaions.
+    Only supporting pretraining, as no labels are available
+    args:
+        args (dict): Program/commandline arguments.
+        dataset_paths (dict): Paths to each datset split.
+    Returns:
+        dataloaders (): pretraindataloaders.
+    '''
+    # guassian_blur from https://github.com/facebookresearch/moco/
+    guassian_blur = transforms.RandomApply([GaussianBlur(args.blur_sigma)], p=args.blur_p)
+
+    color_jitter = transforms.ColorJitter(
+        0.8*args.jitter_d, 0.8*args.jitter_d, 0.8*args.jitter_d, 0.2*args.jitter_d)
+    rnd_color_jitter = transforms.RandomApply([color_jitter], p=args.jitter_p)
+
+    rnd_grey = transforms.RandomGrayscale(p=args.grey_p)
+
+    # Base train and test augmentaions
+    transf = {
+        'train': transforms.Compose([
+            transforms.RandomResizedCrop((args.crop_dim, args.crop_dim)),
+            rnd_color_jitter,
+            rnd_grey,
+            guassian_blur,
+            FixedRandomRotation(angles=[0, 90, 180, 270]),
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomVerticalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize((0.485, 0.456, 0.406),
+                                 (0.229, 0.224, 0.225))]),
+    }
+
+
+    dataset = LmdbDataset(lmdb_path=args.dataset_path,
+                        transform=transf['train'],
+                        two_crop=True)
+
+    dataloaders = {}
+    dataloaders['pretrain'] = DataLoader(dataset, num_workers=args.num_workers,
+                                        pin_memory=True, drop_last=True,
+                                        shuffle=True,
+                                        batch_size=args.batch_size)
+
+    return dataloaders
+
+
 
 
 def imagenet_dataloader(args, dataset_paths):

@@ -5,6 +5,7 @@ import numpy as np
 import time
 import random
 import pandas as pd
+import lmdb
 
 import torch
 from torch.utils.data import Dataset
@@ -68,7 +69,7 @@ def load_moco(base_encoder, args):
             state_dict[f'module.{k[len("module.encoder_q."):]}'] = state_dict[k]
         # delete renamed or unused k
         del state_dict[k]
-    
+
     print('Loading state dict with the keys: ', list(state_dict.keys()))
     # Load the encoder parameters
     base_encoder.load_state_dict(state_dict, strict=False)
@@ -301,6 +302,59 @@ class ImagePatchesDataset(Dataset):
         label = self.label_enum[row.label]
 
         return img, label, row.patch_id, row.slide_id
+
+
+class LmdbDataset(torch.utils.data.Dataset):
+    def __init__(self, lmdb_path, transform, two_crop=False):
+        self.cursor_access = False
+        self.lmdb_path = lmdb_path
+        self.image_dimensions = (224, 224, 3) # size of files in lmdb
+        self.transform = transform
+        self.two_crop = two_crop
+
+        self._init_db()
+
+    def __len__(self):
+        return self.length
+
+    def _init_db(self):
+        num_readers = 999
+
+        self.env = lmdb.open(self.lmdb_path,
+                             max_readers=num_readers,
+                             readonly=1,
+                             lock=0,
+                             readahead=0,
+                             meminit=0)
+
+        self.txn = self.env.begin(write=False)
+        self.cursor = self.txn.cursor()
+
+        self.length = self.txn.stat()['entries']
+        self.keys = [key for key, _ in self.txn.cursor()] # not so fast...
+
+    def close(self):
+        self.env.close()
+
+    def __getitem__(self, index):
+        ' cursor in lmdb is much faster than random access '
+        if self.cursor_access:
+            if not self.cursor.next():
+                self.cursor.first()
+            image = self.cursor.value()
+        else:
+            image = self.txn.get(self.keys[index])
+
+        image = np.frombuffer(image, dtype=np.uint8)
+        image = image.reshape(self.image_dimensions)
+        image = Image.fromarray(image)
+
+        img = self.transform(image)
+        if self.two_crop:
+            img2 = self.transform(image)
+            img = torch.cat([img, img2], dim=0)
+
+        return [img]
 
 
 def random_split_image_folder(data, labels, n_classes, n_samples_per_class):
