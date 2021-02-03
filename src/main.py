@@ -10,6 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel
+from torch.cuda import amp
 
 from train import finetune, evaluate, pretrain, supervised
 from datasets import get_dataloaders
@@ -107,8 +108,9 @@ parser.add_argument("--balanced_validation_set", action="store_true", default=Fa
 parser.add_argument('--save_dir', type=str, help='Path to save log')
 parser.add_argument('--save_after', type=int, default=1, help='Save model after every Nth epoch, default every epoch')
 parser.add_argument('--num_workers', type=int, default=16)
+parser.add_argument('--seed', type=int, default=44)
 
-def setup(distributed):
+def setup(args, distributed):
     """ Sets up for optional distributed training.
     For distributed training run as:
         python -m torch.distributed.launch --nnodes=1 --node_rank=0 --nproc_per_node=2 --use_env main.py
@@ -142,29 +144,29 @@ def setup(distributed):
         local_rank = None
         device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
-    seed = 44
+    seed = args.seed
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-    torch.backends.cudnn.enabled = True
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False  # True
+    #torch.backends.cudnn.enabled = True
+    torch.backends.cudnn.deterministic = False # don't need this strict reprod.
+    torch.backends.cudnn.benchmark = True # False
 
     return device, local_rank
 
 
 def main():
     """ Main """
-    neptune.init('k-stacke/sandbox')
+    neptune.init('k-stacke/self-supervised')
 
     # Arguments
     args = parser.parse_args()
 
     # Setup Distributed Training
-    device, local_rank = setup(distributed=args.distributed)
+    device, local_rank = setup(args, distributed=args.distributed)
 
     # Setup logging, saving models, summaries
     args = experiment_config(parser, args)
@@ -205,6 +207,8 @@ def main():
     moco = MoCo_Model(args, queue_size=args.queue_size,
                       momentum=args.queue_momentum, temperature=args.temperature)
 
+    scaler = amp.GradScaler()
+
     # Place model onto GPU(s)
     if args.distributed:
         torch.cuda.set_device(device)
@@ -240,7 +244,7 @@ def main():
     # launch model training or inference
     if args.pretrain:
         # Pretrain the encoder and projection head
-        pretrain(moco, dataloaders, args, exp)
+        pretrain(moco, dataloaders, scaler, args, exp)
 
     if args.evaluate:
         # Load pretrained model, freeze layers
@@ -250,14 +254,15 @@ def main():
         if args.finetune:
             # Retrain the entire network
             base_encoder.requires_grad = True
-        else:
-            # Make sure only fc layers are trained
-            # freeze all layers but the last fc
-            for name, param in base_encoder.named_parameters():
-                if name not in ['fc.weight', 'fc.bias']:
-                    param.requires_grad = False
-            # init the fc layer
-            init_weights(base_encoder)
+
+        #else:
+        #    # Make sure only fc layers are trained
+        #    # freeze all layers but the last fc
+        #    for name, param in base_encoder.named_parameters():
+        #        if name not in ['module.fc.weight', 'module.fc.bias']:
+        #            param.requires_grad = False
+        #    # init the fc layer
+        #    init_weights(base_encoder, distributed=True)
 
         # Supervised Finetuning of the supervised classification head
         finetune(base_encoder, dataloaders, args, exp)

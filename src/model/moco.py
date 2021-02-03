@@ -2,6 +2,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.cuda import amp
 
 import model.network as models
 
@@ -181,6 +182,7 @@ class MoCo_Model(nn.Module):
 
         return logits, labels
 
+    @amp.autocast()
     def forward(self, x_q, x_k):
 
         batch_size = x_q.size(0)

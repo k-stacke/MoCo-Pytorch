@@ -11,12 +11,13 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
 import torch.nn.functional as F
+from torch.cuda import amp
 # from torch.utils.tensorboard import SummaryWriter
 from optimisers import get_optimiser
 from PIL import Image
 
 
-def pretrain(encoder, dataloaders, args, exp):
+def pretrain(encoder, dataloaders, scaler, args, exp):
     ''' Pretrain script - MoCo
 
         Pretrain the encoder and projection head with a Contrastive InfoNCE Loss.
@@ -75,14 +76,17 @@ def pretrain(encoder, dataloaders, args, exp):
             # retrieve the 2 views
             x_i, x_j = torch.split(inputs, [3, 3], dim=1)
 
-            # Get the encoder representation
-            logit, label = encoder(x_i, x_j)
+            with amp.autocast():
+                # Get the encoder representation
+                logit, label = encoder(x_i, x_j)
 
-            loss = criterion(logit, label)
+                loss = criterion(logit, label)
 
-            loss.backward()
+            scaler.scale(loss).backward()
 
-            optimiser.step()
+            #optimiser.step()
+            scaler.step(optimiser)
+            scaler.update()
 
             torch.cuda.synchronize()
 
@@ -365,44 +369,44 @@ def finetune(encoder, dataloaders, args, exp):
             train_dataloader = dataloaders['train']
 
         ''' epoch loop '''
-        for i, data in enumerate(train_dataloader):
+        with torch.enable_grad():
+            for i, data in enumerate(train_dataloader):
+                inputs = data[0].cuda(non_blocking=True)
 
-            inputs = data[0].cuda(non_blocking=True)
+                target = data[1].cuda(non_blocking=True)
 
-            target = data[1].cuda(non_blocking=True)
+                # Forward pass
+                optimiser.zero_grad()
 
-            # Forward pass
-            optimiser.zero_grad()
+                # Do not compute the gradients for the frozen encoder
+                output = encoder(inputs)
 
-            # Do not compute the gradients for the frozen encoder
-            output = encoder(inputs)
+                # Take pretrained encoder representations
+                loss = criterion(output, target)
 
-            # Take pretrained encoder representations
-            loss = criterion(output, target)
+                loss.backward()
 
-            loss.backward()
+                optimiser.step()
 
-            optimiser.step()
+                torch.cuda.synchronize()
 
-            torch.cuda.synchronize()
+                sample_count += inputs.size(0)
 
-            sample_count += inputs.size(0)
+                run_loss += loss.item()
 
-            run_loss += loss.item()
+                predicted = output.argmax(1)
 
-            predicted = output.argmax(1)
+                acc = (predicted == target).sum().item() #/ target.size(0)
 
-            acc = (predicted == target).sum().item() / target.size(0)
+                run_top1 += acc
 
-            run_top1 += acc
+                if args.n_classes > 5:
+                    _, output_topk = output.topk(5, 1, True, True)
 
-            if args.n_classes > 5:
-                _, output_topk = output.topk(5, 1, True, True)
+                    acc_top5 = (output_topk == target.view(-1, 1).expand_as(output_topk)
+                                ).sum().item() / target.size(0)  # num corrects
 
-                acc_top5 = (output_topk == target.view(-1, 1).expand_as(output_topk)
-                            ).sum().item() / target.size(0)  # num corrects
-
-                run_top5 += acc_top5
+                    run_top5 += acc_top5
 
         epoch_finetune_loss = run_loss / sample_count #len(dataloaders['train'])
 
@@ -430,7 +434,7 @@ def finetune(encoder, dataloaders, args, exp):
             #     'finetune_lr', {'train': optimiser.param_groups[0]['lr']}, epoch+1)
 
         valid_loss, valid_acc, valid_acc_top5, _ = evaluate(
-            encoder, dataloaders, 'valid', epoch, args)
+            encoder, dataloaders, 'valid', epoch, args, exp)
 
 
         ## Save model
@@ -523,7 +527,6 @@ def evaluate(encoder, dataloaders, mode, epoch, args, exp):
 
     ''' epoch loop '''
     for i, data in enumerate(eval_dataloader):
-
         # Do not compute gradient for encoder and classification head
         encoder.zero_grad()
 
@@ -541,7 +544,7 @@ def evaluate(encoder, dataloaders, mode, epoch, args, exp):
         run_loss += loss.item()
 
         predicted = output.argmax(-1)
-        acc = (predicted == target).sum().item() / target.size(0)
+        acc = (predicted == target).sum().item()# / target.size(0)
         run_top1 += acc
 
         all_preds.extend(predicted.cpu().numpy())

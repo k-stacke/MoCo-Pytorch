@@ -12,7 +12,13 @@ import torch.nn as nn
 from torchvision import transforms
 
 from PIL import Image, ImageFilter
+from model.simclr_model import Net
 
+def load_simclr(args):
+    model = Net(args)
+    for param in model.f.parameters():
+        param.requires_grad = False
+    return model
 
 class GaussianBlur(object):
     """Gaussian blur augmentation: https://github.com/facebookresearch/moco/"""
@@ -51,18 +57,19 @@ def load_moco(base_encoder, args):
     print("\n\nLoading the model: {}\n\n".format(args.load_checkpoint_dir))
 
     # Load the pretrained model
-    checkpoint = torch.load(args.load_checkpoint_dir, map_location="cpu")
+    checkpoint = torch.load(args.load_checkpoint_dir, map_location='cuda')
 
     # rename moco pre-trained keys
     state_dict = checkpoint['moco']
     for k in list(state_dict.keys()):
         # retain only encoder_q up to before the embedding layer
-        if k.startswith('encoder_q') and not k.startswith('encoder_q.fc'):
+        if k.startswith('module.encoder_q') and not k.startswith('module.encoder_q.fc'):
             # remove prefix
-            state_dict[k[len("encoder_q."):]] = state_dict[k]
+            state_dict[f'module.{k[len("module.encoder_q."):]}'] = state_dict[k]
         # delete renamed or unused k
         del state_dict[k]
-
+    
+    print('Loading state dict with the keys: ', list(state_dict.keys()))
     # Load the encoder parameters
     base_encoder.load_state_dict(state_dict, strict=False)
 
@@ -106,8 +113,9 @@ def init_weights(m):
     '''
 
     # init the fc layer
-    m.fc.weight.data.normal_(mean=0.0, std=0.01)
-    m.fc.bias.data.zero_()
+    #m.fc.weight.data.normal_(mean=0.0, std=0.01)
+    #m.fc.bias.data.zero_()
+    m.fc.reset_parameters()
 
 
 class CustomDataset(Dataset):
@@ -215,8 +223,8 @@ def get_dataframes(opt):
     else:
         raise Exception(f'Cannot find file: {opt.test_data_csv}')
 
-    train_df = train_df.sample(100)
-    test_df = test_df.sample(100)
+    #train_df = train_df.sample(10000)
+    #test_df = test_df.sample(10000)
 
     train_df = clean_data(opt.dataset_path, train_df)
     test_df = clean_data(opt.dataset_path, test_df)
@@ -245,7 +253,6 @@ def get_dataframes(opt):
         if os.path.isfile(opt.validation_data_csv):
             print("reading csv file: ", opt.validation_data_csv)
             val_df = pd.read_csv(opt.validation_data_csv)
-            val_df = val_df.sample(100)
         else:
             raise Exception(f'Cannot find file: {opt.test_data_csv}')
 
