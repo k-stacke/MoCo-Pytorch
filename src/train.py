@@ -55,6 +55,7 @@ def pretrain(encoder, dataloaders, scaler, args, exp):
 
         sample_count = 0
         run_loss = 0
+        run_acc = 0
 
         # Print setup for distributed only printing on one node.
         if args.print_progress:
@@ -76,11 +77,15 @@ def pretrain(encoder, dataloaders, scaler, args, exp):
             # retrieve the 2 views
             x_i, x_j = torch.split(inputs, [3, 3], dim=1)
 
+
             with amp.autocast():
                 # Get the encoder representation
                 logit, label = encoder(x_i, x_j)
 
                 loss = criterion(logit, label)
+
+            _, preds = torch.max(logit.data, 1)
+            acc = (preds == 0).sum().item()/(preds.reshape(-1).shape[0])
 
             scaler.scale(loss).backward()
 
@@ -93,6 +98,11 @@ def pretrain(encoder, dataloaders, scaler, args, exp):
             sample_count += inputs.size(0)
 
             run_loss += loss.item()
+            run_acc += acc
+
+            if exp is not None:
+                exp.log_metric('loss', loss.item())
+                exp.log_metric('acc', acc)
 
         epoch_pretrain_loss = run_loss / len(dataloaders['pretrain'].dataset)
 
@@ -112,6 +122,7 @@ def pretrain(encoder, dataloaders, scaler, args, exp):
             logging.info('\n[Train] loss: {:.4f}'.format(epoch_pretrain_loss))
             exp.log_metric('epoch_loss', epoch_pretrain_loss)
             exp.log_metric('learning_rate', optimiser.param_groups[0]['lr'])
+            exp.log_metric('accuracy', run_acc/len(dataloaders['pretrain'].dataset))
             # args.writer.add_scalars('epoch_loss', {'pretrain': epoch_pretrain_loss}, epoch+1)
             # args.writer.add_scalars('lr', {'pretrain': optimiser.param_groups[0]['lr']}, epoch+1)
 
