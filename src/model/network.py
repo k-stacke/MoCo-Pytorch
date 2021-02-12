@@ -370,3 +370,11 @@ class projection_MLP(nn.Module):
 
     def forward(self, x):
         return self.projection_head(x)
+
+
+class Identity(nn.Module):
+    def __init__(self):
+        super(Identity, self).__init__()
+
+    def forward(self, x):
+        return x

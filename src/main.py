@@ -109,6 +109,8 @@ parser.add_argument('--save_dir', type=str, help='Path to save log')
 parser.add_argument('--save_after', type=int, default=1, help='Save model after every Nth epoch, default every epoch')
 parser.add_argument('--num_workers', type=int, default=16)
 parser.add_argument('--seed', type=int, default=44)
+parser.add_argument('--layer_out', type=int, default=-1, help='If output during classification should come from earlier layer: [1-4]')
+
 
 def setup(args, distributed):
     """ Sets up for optional distributed training.
@@ -170,6 +172,9 @@ def main():
 
     # Setup logging, saving models, summaries
     args = experiment_config(parser, args)
+    args.output_dims = 2048
+    if args.layer_out > -1:
+        args.output_dims = min(2**(8+args.layer_out-1), 2048)
 
     # Get Dataloaders for Dataset of choice
     dataloaders, args = get_dataloaders(args)
@@ -191,6 +196,12 @@ def main():
         # Load model
         base_encoder = getattr(models, args.model)(
             args, num_classes=args.n_classes)  # Encoder
+
+        if args.layer_out > -1:
+            print("Using output from layer: ", args.layer_out)
+            for i in range(args.layer_out+1, 5):
+                setattr(base_encoder, f'layer{i}', models.Identity())
+            base_encoder.fc = nn.Linear(args.output_dims, args.n_classes, bias=True)
 
     else:
         raise NotImplementedError("Model Not Implemented: {}".format(args.model))
