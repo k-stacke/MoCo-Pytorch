@@ -19,6 +19,7 @@ import model.network as models
 from model.moco import MoCo_Model
 
 import neptune
+from neptune import OfflineBackend
 
 warnings.filterwarnings("ignore")
 
@@ -31,8 +32,9 @@ parser.add_argument('-c', '--my-config', required=False,
                     is_config_file=True, help='config file path')
 parser.add_argument('--dataset', default='cifar10',
                     help='Dataset, (Options: cifar10, cifar100, stl10, imagenet, tinyimagenet, cam).')
-parser.add_argument('--dataset_path', default=None,
-                    help='Path to dataset, Not needed for TorchVision Datasets.')
+parser.add_argument('--dataset_path', nargs='+', required=True,
+                    help='Path to dataset(s), exampel ["/proj/karst/camelyon16", "/proj/karst/camelyon16_5x"]')
+
 parser.add_argument('--model', default='resnet18',
                     help='Model, (Options: resnet18, resnet34, resnet50, resnet101, resnet152).')
 parser.add_argument('--n_epochs', type=int, default=1000,
@@ -112,6 +114,11 @@ parser.add_argument('--seed', type=int, default=44)
 parser.add_argument('--layer_out', type=int, default=-1, help='If output during classification should come from earlier layer: [1-4]')
 
 
+# Zoom parameters
+parser.add_argument('--aug', choices=['multi-crop', 'multi-res'], default=None, required=False,
+                    help='Multi-crop: random crop, multi-res: random resize. Both results in differet image size of views')
+parser.add_argument('--crop_dim', nargs=2, type=int, default=[224, 224], help='crop size for view 1 and 2. exmaple [224, 96]')
+
 def setup(args, distributed):
     """ Sets up for optional distributed training.
     For distributed training run as:
@@ -155,14 +162,14 @@ def setup(args, distributed):
 
     #torch.backends.cudnn.enabled = True
     torch.backends.cudnn.deterministic = False # don't need this strict reprod.
-    torch.backends.cudnn.benchmark = True # False
+    # torch.backends.cudnn.benchmark = True # False
 
     return device, local_rank
 
 
 def main():
     """ Main """
-    neptune.init('k-stacke/self-supervised')
+    neptune.init('k-stacke/self-supervised', backend=OfflineBackend())
 
     # Arguments
     args = parser.parse_args()

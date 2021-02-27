@@ -1,0 +1,4 @@
+training/
+.ipynb_checkpoints/*
+Pipfile.lock
+settings.json

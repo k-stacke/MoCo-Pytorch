@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import os
+import random
 import gc
 import logging
 import numpy as np
@@ -69,13 +70,20 @@ def pretrain(encoder, dataloaders, scaler, args, exp):
         for i, data in enumerate(train_dataloader):
             inputs = data[0]
 
-            inputs = inputs.cuda(non_blocking=True)
+            # inputs = inputs.cuda(non_blocking=True)
 
             # Forward pass
             optimiser.zero_grad()
 
             # retrieve the 2 views
-            x_i, x_j = torch.split(inputs, [3, 3], dim=1)
+            # x_i, x_j = torch.split(inputs, [3, 3], dim=1)
+
+            # When using mutli-crop/resolution, the key encoder will always get smaller image input
+            # not clear if this is problematics.
+            # Randomly swap places between large and small crops
+            indices = [0, 1]
+            random.shuffle(indices)
+            x_i, x_j = inputs[indices[0]].cuda(non_blocking=True), inputs[indices[1]].cuda(non_blocking=True)
 
 
             with amp.autocast():
@@ -85,9 +93,12 @@ def pretrain(encoder, dataloaders, scaler, args, exp):
                 loss = criterion(logit, label)
 
             _, preds = torch.max(logit.data, 1)
-            acc = (preds == 0).sum().item()/(preds.reshape(-1).shape[0])
+
+            acc = (preds == 0).sum().item()/(preds.shape[0])
+            #print(f'acc per mini-batch: {acc}')
 
             scaler.scale(loss).backward()
+            #print(encoder.encoder_q.conv1.weight.grad.median().item())
 
             #optimiser.step()
             scaler.step(optimiser)
@@ -95,7 +106,7 @@ def pretrain(encoder, dataloaders, scaler, args, exp):
 
             torch.cuda.synchronize()
 
-            sample_count += inputs.size(0)
+            sample_count += inputs[0].size(0)
 
             run_loss += loss.item()
             run_acc += acc
@@ -103,6 +114,8 @@ def pretrain(encoder, dataloaders, scaler, args, exp):
             if exp is not None:
                 exp.log_metric('loss', loss.item())
                 exp.log_metric('acc', acc)
+                if i > 0:
+                    exp.log_metric('grad median', encoder.encoder_q.conv1.weight.grad.median().item())
 
         epoch_pretrain_loss = run_loss / len(dataloaders['pretrain'].dataset)
 

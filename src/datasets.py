@@ -129,7 +129,7 @@ def get_dataloaders(args):
         dataset = 'camelyon'
 
         args.class_names = None
-        args.crop_dim = 224
+        # args.crop_dim = 224
         args.n_channels, args.n_classes = 3, 2
 
         dataset_paths = {'train': args.dataset_path,
@@ -168,19 +168,39 @@ def camelyon_dataloaders(args, dataset_paths):
 
     rnd_grey = transforms.RandomGrayscale(p=args.grey_p)
 
+    if args.aug == 'multi-res':
+        print(f'Using multires, [{args.crop_dim[0], args.crop_dim[-1]}]')
+        # Diff resolution, different size of crops
+        crop_resize = [transforms.Resize((args.crop_dim[0], args.crop_dim[0])),
+                       transforms.Resize((args.crop_dim[-1], args.crop_dim[-1]))]
+
+    elif args.aug == 'multi-crop':
+        print(f'Using multi-crop [{args.crop_dim[0], args.crop_dim[-1]}]')
+        # Same resolution, different size of crops
+        crop_resize = [transforms.RandomResizedCrop((args.crop_dim[0], args.crop_dim[0]), scale=(1.,1.)),
+                       transforms.RandomResizedCrop((args.crop_dim[-1], args.crop_dim[-1]), scale=(1.,1.))]
+    else:
+        print('Using MoCov2 aug')
+        # MoCo v2 aug
+        crop_resize = [transforms.RandomResizedCrop((args.crop_dim[0], args.crop_dim[-1]))]
+
+    train_transforms = []
+    for i in range(len(crop_resize)):
+        train_transforms.append(transforms.Compose([
+                crop_resize[i],
+                rnd_color_jitter,
+                rnd_grey,
+                guassian_blur,
+                FixedRandomRotation(angles=[0, 90, 180, 270]),
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomVerticalFlip(),
+                transforms.ToTensor(),
+                transforms.Normalize((0.485, 0.456, 0.406),
+                                    (0.229, 0.224, 0.225))]))
+
     # Base train and test augmentaions
     transf = {
-        'train': transforms.Compose([
-            transforms.RandomResizedCrop((args.crop_dim, args.crop_dim)),
-            rnd_color_jitter,
-            rnd_grey,
-            guassian_blur,
-            FixedRandomRotation(angles=[0, 90, 180, 270]),
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomVerticalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize((0.485, 0.456, 0.406),
-                                 (0.229, 0.224, 0.225))]),
+        'train': train_transforms,
         'test':  transforms.Compose([
             transforms.CenterCrop((args.crop_dim, args.crop_dim)),
             transforms.ToTensor(),
@@ -199,23 +219,23 @@ def camelyon_dataloaders(args, dataset_paths):
 
     datasets = {}
     datasets['pretrain'] = ImagePatchesDataset(dataframe=train_df,
-                        image_dir=args.dataset_path,
+                        image_dirs=args.dataset_path,
                         transform=transf['train'],
                         two_crop=args.twocrop)
 
     # Finetuning train
     datasets['train'] = ImagePatchesDataset(dataframe=train_df,
-                        image_dir=args.dataset_path,
+                        image_dirs=args.dataset_path,
                         transform=transf['train'],
                         two_crop=False)
 
     datasets['valid'] = ImagePatchesDataset(dataframe=val_df,
-                        image_dir=args.dataset_path,
+                        image_dirs=args.dataset_path,
                         transform=transf['test'],
                         two_crop=False)
 
     datasets['test'] = ImagePatchesDataset(dataframe=test_df,
-                            image_dir=args.dataset_path,
+                            image_dirs=args.dataset_path,
                             transform=transf['test'],
                             two_crop=False)
 
@@ -281,7 +301,7 @@ def multidata_dataloaders(args, dataset_paths):
     }
 
 
-    dataset = LmdbDataset(lmdb_path=args.dataset_path,
+    dataset = LmdbDataset(lmdb_path=args.dataset_path[0],
                         transform=transf['train'],
                         two_crop=True)
 

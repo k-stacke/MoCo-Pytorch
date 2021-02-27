@@ -203,12 +203,13 @@ class CustomDataset(Dataset):
         else:
             return img, self.labels[index].long()
 
-def clean_data(img_dir, dataframe):
+def clean_data(img_dirs, dataframe):
     """ Clean the data """
-    for idx, row in dataframe.iterrows():
-        if not os.path.isfile(f'{img_dir}/{row.filename}'):
-            print(f"Removing non-existing file from dataset: {img_dir}/{row.filename}")
-            dataframe = dataframe.drop(idx)
+    for img_dir in img_dirs:
+        for idx, row in dataframe.iterrows():
+            if not os.path.isfile(f'{img_dir}/{row.filename}'):
+                print(f"Removing non-existing file from dataset: {img_dir}/{row.filename}")
+                dataframe = dataframe.drop(idx)
     return dataframe
 
 def get_dataframes(opt):
@@ -270,9 +271,9 @@ def get_dataframes(opt):
 
 
 class ImagePatchesDataset(Dataset):
-    def __init__(self, dataframe, image_dir, transform=None, two_crop=False):
+    def __init__(self, dataframe, image_dirs, transform=None, two_crop=False):
         self.dataframe = dataframe
-        self.image_dir = image_dir
+        self.image_dir = image_dirs
         self.transform = transform
         self.two_crop = two_crop
 
@@ -284,7 +285,9 @@ class ImagePatchesDataset(Dataset):
 
     def __getitem__(self, index):
         row = self.dataframe.iloc[index]
-        path = f"{self.image_dir}/{row.filename}"
+
+        data_path = random.choice(self.image_dir) # take image from random folder (if multiple folders are present)
+        path = f"{data_path}/{row.filename}"
         try:
             image = Image.open(path)
         except IOError:
@@ -292,10 +295,11 @@ class ImagePatchesDataset(Dataset):
             return None
 
         if self.transform is not None:
-            img = self.transform(image)
+            img = self.transform[0](image)
             if self.two_crop:
-                img2 = self.transform(image)
-                img = torch.cat([img, img2], dim=0)
+                img2 = self.transform[-1](image) #can be same or diff transform than first
+                # img = torch.cat([img, img2], dim=0)
+                img = [img, img2]
         else:
             raise NotImplementedError
 
