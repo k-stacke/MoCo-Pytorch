@@ -191,6 +191,135 @@ def pretrain(encoder, dataloaders, scaler, args, exp):
 
     gc.collect()  # release unreferenced memory
 
+def pretrain_deepspeed(model_engine, training_loader, args, exp):
+    ''' Pretrain script using DeepSpeed- MoCo
+
+        Pretrain the encoder and projection head with a Contrastive InfoNCE Loss.
+    '''
+    ''' Loss / Criterion '''
+    criterion = nn.CrossEntropyLoss().cuda()
+
+    ''' Pretrain loop '''
+    for epoch in range(args.n_epochs):
+        # Train models
+        model_engine.train()
+
+        sample_count = 0
+        run_loss = 0
+        run_acc = 0
+        client_sd = {}
+
+        # Print setup for distributed only printing on one node.
+        if args.print_progress:
+            logging.info('\nEpoch {}/{}:\n'.format(epoch+1, args.n_epochs))
+            # tqdm for process (rank) 0 only when using distributed training
+            train_dataloader = tqdm(training_loader)
+        else:
+            train_dataloader = training_loader
+
+        ''' epoch loop '''
+        for i, data in enumerate(train_dataloader):
+            inputs = data[0]
+
+            # inputs = inputs.cuda(non_blocking=True)
+
+            # Forward pass
+
+            # When using mutli-crop/resolution, the key encoder will always get smaller image input
+            # not clear if this is problematics.
+            # Randomly swap places between large and small crops
+            indices = [0, 1]
+            random.shuffle(indices)
+            x_i, x_j = inputs[indices[0]].to(model_engine.local_rank), inputs[indices[1]].to(model_engine.local_rank)
+
+            # Get the encoder representation
+            logit, label = model_engine(x_i, x_j)
+
+            loss = criterion(logit, label)
+
+            _, preds = torch.max(logit.data, 1)
+
+            acc = (preds == 0).sum().item()/(preds.shape[0])
+
+            model_engine.backward(loss)
+            model_engine.step()
+
+
+            torch.cuda.synchronize()
+
+            sample_count += inputs[0].size(0)
+
+            run_loss += loss.item()
+            run_acc += acc
+
+            if exp is not None:
+                exp.log_metric('loss', loss.item())
+                exp.log_metric('acc', acc)
+                if i > 0:
+                    exp.log_metric('grad median', encoder.encoder_q.conv1.weight.grad.median().item())
+
+        epoch_pretrain_loss = run_loss / len(dataloaders['pretrain'].dataset)
+
+
+        ''' Printing '''
+        if args.print_progress:  # only validate using process 0
+            logging.info('\n[Train] loss: {:.4f}'.format(epoch_pretrain_loss))
+            exp.log_metric('epoch_loss', epoch_pretrain_loss)
+            exp.log_metric('learning_rate', optimiser.param_groups[0]['lr'])
+            exp.log_metric('accuracy', run_acc/len(dataloaders['pretrain'].dataset))
+            # args.writer.add_scalars('epoch_loss', {'pretrain': epoch_pretrain_loss}, epoch+1)
+            # args.writer.add_scalars('lr', {'pretrain': optimiser.param_groups[0]['lr']}, epoch+1)
+
+        ## Save model
+        if epoch % args.save_after == 0:
+            client_sd['epoch'] = epoch
+            ckpt_id = epoch_pretrain_loss.item()
+            model_engine.save_checkpoint(args.model_dir, ckpt_id, client_sd = client_sd)
+
+            # torch.save(state, f'{args.model_dir}/moco_model_{epoch}.pt')
+            # args.load_checkpoint_dir = f'{args.model_dir}/moco_model_{epoch}.pt'
+        # Delete old ones, save latest, keep every 10th
+        # if (epoch - 1) % 10 != 0:
+        #     try:
+        #         os.remove(f'{args.model_dir}/moco_model_{epoch - 1}.pt')
+        #     except:
+        #         print("not enough models there yet, nothing to delete")
+
+        # # For the best performing epoch, reset patience and save model,
+        # # else update patience.
+        # if epoch_pretrain_loss <= best_valid_loss:
+        #     patience_counter = 0
+        #     best_epoch = epoch + 1
+        #     best_valid_loss = epoch_pretrain_loss
+
+        #     # saving using process (rank) 0 only as all processes are in sync
+
+        #     state = {
+        #         #'args': args,
+        #         'moco': encoder.state_dict(),
+        #         'optimiser': optimiser.state_dict(),
+        #         'epoch': epoch,
+        #     }
+
+        #     torch.save(state, args.checkpoint_dir)
+        # else:
+        #     patience_counter += 1
+        #     if patience_counter == (args.patience - 10):
+        #         logging.info('\nPatience counter {}/{}.'.format(
+        #             patience_counter, args.patience))
+        #     elif patience_counter == args.patience:
+        #         logging.info('\nEarly stopping... no improvement after {} Epochs.'.format(
+        #             args.patience))
+        #         break
+
+        epoch_pretrain_loss = None  # reset loss
+
+    del state
+
+    torch.cuda.empty_cache()
+
+    gc.collect()  # release unreferenced memory
+
 
 def supervised(encoder, dataloaders, args,):
     ''' Supervised Train script - MoCo
