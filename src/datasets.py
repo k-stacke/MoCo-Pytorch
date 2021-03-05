@@ -169,17 +169,21 @@ def camelyon_dataloaders(args, dataset_paths):
 
     rnd_grey = transforms.RandomGrayscale(p=args.grey_p)
 
-    if args.aug == 'multi-res':
+    if args.aug == 'multi-res' and not args.cut_mix:
         print(f'Using multires, [{args.crop_dim[0], args.crop_dim[-1]}]')
         # Diff resolution, different size of crops
         crop_resize = [transforms.Resize((args.crop_dim[0], args.crop_dim[0])),
                        transforms.Resize((args.crop_dim[-1], args.crop_dim[-1]))]
 
-    elif args.aug == 'multi-crop':
+    elif args.aug == 'multi-crop' and not args.cut_mix:
         print(f'Using multi-crop [{args.crop_dim[0], args.crop_dim[-1]}]')
         # Same resolution, different size of crops
         crop_resize = [transforms.RandomResizedCrop((args.crop_dim[0], args.crop_dim[0]), scale=(1.,1.)),
                        transforms.RandomResizedCrop((args.crop_dim[-1], args.crop_dim[-1]), scale=(1.,1.))]
+    elif args.cut_mix:
+        print(f'Using cut mix [{args.crop_dim[0], args.crop_dim[-1]}]')
+        crop_resize = [transforms.Resize((args.crop_dim[0], args.crop_dim[0])),
+                       transforms.Resize((args.crop_dim[0], args.crop_dim[0]))]
     else:
         print('Using MoCov2 aug')
         # MoCo v2 aug
@@ -226,7 +230,8 @@ def camelyon_dataloaders(args, dataset_paths):
     datasets['pretrain'] = ImagePatchesDataset(dataframe=train_df,
                         image_dirs=args.dataset_path,
                         transform=transf['train'],
-                        two_crop=args.twocrop)
+                        two_crop=args.twocrop,
+                        cut_mix=args.cut_mix)
 
     # Finetuning train
     datasets['train'] = ImagePatchesDataset(dataframe=train_df,

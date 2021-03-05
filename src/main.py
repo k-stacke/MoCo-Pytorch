@@ -118,6 +118,7 @@ parser.add_argument('--layer_out', type=int, default=-1, help='If output during 
 parser.add_argument('--aug', choices=['multi-crop', 'multi-res'], default=None, required=False,
                     help='Multi-crop: random crop, multi-res: random resize. Both results in differet image size of views')
 parser.add_argument('--crop_dim', nargs=2, type=int, default=[224, 224], help='crop size for view 1 and 2. exmaple [224, 96]')
+parser.add_argument('--cut_mix', default=False, action='store_true', help='use cut mix augmentation')
 
 def setup(args, distributed):
     """ Sets up for optional distributed training.
@@ -169,7 +170,7 @@ def setup(args, distributed):
 
 def main():
     """ Main """
-    neptune.init('k-stacke/self-supervised')#, backend=OfflineBackend())
+    neptune.init('k-stacke/self-supervised', backend=OfflineBackend())
 
     # Arguments
     args = parser.parse_args()
