@@ -94,7 +94,7 @@ def pretrain(encoder, dataloaders, scaler, args, exp):
 
             _, preds = torch.max(logit.data, 1)
 
-            acc = (preds == 0).sum().item()/(preds.shape[0])
+            correct = (preds == 0).sum().item()#/(preds.shape[0])
             #print(f'acc per mini-batch: {acc}')
 
             scaler.scale(loss).backward()
@@ -109,13 +109,13 @@ def pretrain(encoder, dataloaders, scaler, args, exp):
             sample_count += inputs[0].size(0)
 
             run_loss += loss.item()
-            run_acc += acc
+            run_acc += correct
 
             if exp is not None:
                 exp.log_metric('loss', loss.item())
-                exp.log_metric('acc', acc)
+                exp.log_metric('correct', correct)
                 if i > 0:
-                    exp.log_metric('grad median', encoder.encoder_q.conv1.weight.grad.median().item())
+                    exp.log_metric('grad median', encoder.module.encoder_q.conv1.weight.grad.median().item())
 
         epoch_pretrain_loss = run_loss / len(dataloaders['pretrain'].dataset)
 
@@ -191,7 +191,7 @@ def pretrain(encoder, dataloaders, scaler, args, exp):
 
     gc.collect()  # release unreferenced memory
 
-def pretrain_deepspeed(model_engine, training_loader, args, exp):
+def pretrain_deepspeed(model_engine, dataloaders, args, exp):
     ''' Pretrain script using DeepSpeed- MoCo
 
         Pretrain the encoder and projection head with a Contrastive InfoNCE Loss.
@@ -210,12 +210,12 @@ def pretrain_deepspeed(model_engine, training_loader, args, exp):
         client_sd = {}
 
         # Print setup for distributed only printing on one node.
-        if args.print_progress:
-            logging.info('\nEpoch {}/{}:\n'.format(epoch+1, args.n_epochs))
-            # tqdm for process (rank) 0 only when using distributed training
-            train_dataloader = tqdm(training_loader)
-        else:
-            train_dataloader = training_loader
+        #if args.print_progress:
+        #    logging.info('\nEpoch {}/{}:\n'.format(epoch+1, args.n_epochs))
+        #    # tqdm for process (rank) 0 only when using distributed training
+        #    train_dataloader = tqdm(training_loader)
+        #else:
+        train_dataloader = dataloaders['pretrain']
 
         ''' epoch loop '''
         for i, data in enumerate(train_dataloader):
@@ -252,21 +252,21 @@ def pretrain_deepspeed(model_engine, training_loader, args, exp):
             run_loss += loss.item()
             run_acc += acc
 
-            if exp is not None:
-                exp.log_metric('loss', loss.item())
-                exp.log_metric('acc', acc)
-                if i > 0:
-                    exp.log_metric('grad median', encoder.encoder_q.conv1.weight.grad.median().item())
+            #if exp is not None:
+            #    exp.log_metric('loss', loss.item())
+            #    exp.log_metric('acc', acc)
+            #    if i > 0:
+            #        exp.log_metric('grad median', encoder.encoder_q.conv1.weight.grad.median().item())
 
         epoch_pretrain_loss = run_loss / len(dataloaders['pretrain'].dataset)
 
 
         ''' Printing '''
-        if args.print_progress:  # only validate using process 0
-            logging.info('\n[Train] loss: {:.4f}'.format(epoch_pretrain_loss))
-            exp.log_metric('epoch_loss', epoch_pretrain_loss)
-            exp.log_metric('learning_rate', optimiser.param_groups[0]['lr'])
-            exp.log_metric('accuracy', run_acc/len(dataloaders['pretrain'].dataset))
+        #if args.print_progress:  # only validate using process 0
+        #    logging.info('\n[Train] loss: {:.4f}'.format(epoch_pretrain_loss))
+        #    exp.log_metric('epoch_loss', epoch_pretrain_loss)
+        #    exp.log_metric('learning_rate', optimiser.param_groups[0]['lr'])
+        #    exp.log_metric('accuracy', run_acc/len(dataloaders['pretrain'].dataset))
             # args.writer.add_scalars('epoch_loss', {'pretrain': epoch_pretrain_loss}, epoch+1)
             # args.writer.add_scalars('lr', {'pretrain': optimiser.param_groups[0]['lr']}, epoch+1)
 
@@ -314,11 +314,11 @@ def pretrain_deepspeed(model_engine, training_loader, args, exp):
 
         epoch_pretrain_loss = None  # reset loss
 
-    del state
+    #del state
 
-    torch.cuda.empty_cache()
+    #torch.cuda.empty_cache()
 
-    gc.collect()  # release unreferenced memory
+    #gc.collect()  # release unreferenced memory
 
 
 def supervised(encoder, dataloaders, args,):

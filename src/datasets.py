@@ -9,6 +9,7 @@ from torch.utils.data.distributed import DistributedSampler
 import torchvision
 from torchvision import transforms
 from torchvision.datasets import CIFAR10, MNIST, STL10, ImageNet, CIFAR100, ImageFolder
+import kornia
 
 from utils import *
 
@@ -182,7 +183,7 @@ def camelyon_dataloaders(args, dataset_paths):
     else:
         print('Using MoCov2 aug')
         # MoCo v2 aug
-        crop_resize = [transforms.RandomResizedCrop((args.crop_dim[0], args.crop_dim[-1]))]
+        crop_resize = [transforms.RandomResizedCrop((args.crop_dim[0], args.crop_dim[0]))]
 
     train_transforms = []
     for i in range(len(crop_resize)):
@@ -195,17 +196,21 @@ def camelyon_dataloaders(args, dataset_paths):
                 transforms.RandomHorizontalFlip(),
                 transforms.RandomVerticalFlip(),
                 transforms.ToTensor(),
+                #kornia.color.RgbToHsv(),
                 transforms.Normalize((0.485, 0.456, 0.406),
-                                    (0.229, 0.224, 0.225))]))
+                                    (0.229, 0.224, 0.225))
+                ]))
 
     # Base train and test augmentaions
     transf = {
         'train': train_transforms,
         'test':  transforms.Compose([
-            transforms.CenterCrop((args.crop_dim, args.crop_dim)),
+            transforms.CenterCrop((args.crop_dim[0], args.crop_dim[0])) if not args.aug == 'multi-res' else transforms.Resize((args.crop_dim[0], args.crop_dim[0])),
             transforms.ToTensor(),
+            #kornia.color.RgbToHsv(),
             transforms.Normalize((0.485, 0.456, 0.406),
-                                 (0.229, 0.224, 0.225))])
+                                 (0.229, 0.224, 0.225))
+            ])
     }
 
     train_df, val_df, test_df = get_dataframes(args)
@@ -231,12 +236,12 @@ def camelyon_dataloaders(args, dataset_paths):
 
     datasets['valid'] = ImagePatchesDataset(dataframe=val_df,
                         image_dirs=args.dataset_path,
-                        transform=transf['test'],
+                        transform=[transf['test']],
                         two_crop=False)
 
     datasets['test'] = ImagePatchesDataset(dataframe=test_df,
                             image_dirs=args.dataset_path,
-                            transform=transf['test'],
+                            transform=[transf['test']],
                             two_crop=False)
 
 

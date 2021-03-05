@@ -15,6 +15,9 @@ from torchvision import transforms
 from PIL import Image, ImageFilter
 from model.simclr_model import Net
 
+from PIL import ImageFile
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
 def load_simclr(args):
     model = Net(args)
     for param in model.f.parameters():
@@ -206,6 +209,7 @@ class CustomDataset(Dataset):
 def clean_data(img_dirs, dataframe):
     """ Clean the data """
     for img_dir in img_dirs:
+        print('Checking data in', img_dir)
         for idx, row in dataframe.iterrows():
             if not os.path.isfile(f'{img_dir}/{row.filename}'):
                 print(f"Removing non-existing file from dataset: {img_dir}/{row.filename}")
@@ -286,17 +290,22 @@ class ImagePatchesDataset(Dataset):
     def __getitem__(self, index):
         row = self.dataframe.iloc[index]
 
-        data_path = random.choice(self.image_dir) # take image from random folder (if multiple folders are present)
-        path = f"{data_path}/{row.filename}"
-        try:
-            image = Image.open(path)
-        except IOError:
-            print(f"could not open {path}")
-            return None
+        #data_path = random.choice(self.image_dir) # take image from random folder (if multiple folders are present)
+        images = []
+        for data_path in self.image_dir:
+            path = f"{data_path}/{row.filename}"
+            try:
+                image = Image.open(path)
+                images.append(image)
+            except IOError:
+                print(f"could not open {path}")
+                return None
 
         if self.transform is not None:
+            image = images[0]
             img = self.transform[0](image)
             if self.two_crop:
+                image = images[-1]
                 img2 = self.transform[-1](image) #can be same or diff transform than first
                 # img = torch.cat([img, img2], dim=0)
                 img = [img, img2]

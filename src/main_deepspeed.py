@@ -12,7 +12,7 @@ import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel
 from torch.cuda import amp
 
-from train import finetune, evaluate, pretrain, supervised
+from train import finetune, evaluate, pretrain, supervised, pretrain_deepspeed
 from datasets import get_dataloaders
 from utils import *
 import model.network as models
@@ -181,7 +181,7 @@ def main():
     args = parser.parse_args()
 
     # Setup Distributed Training
-    device, local_rank = setup(args, distributed=args.distributed)
+    #device, local_rank = setup(args, distributed=args.distributed)
 
     # Setup logging, saving models, summaries
     args = experiment_config(parser, args)
@@ -246,15 +246,15 @@ def main():
     dev_set = dataloaders['valid'].dataset
     test_set = dataloaders['test'].dataset
 
-    training_loader = model_engine.deepspeed_io(train_set, **dataloader_kwargs)
-    dev_loader = model_engine.deepspeed_io(dev_set, **dataloader_kwargs)
-    test_loader = model_engine.deepspeed_io(test_set, **dataloader_kwargs)
+    training_loader = dataloaders['pretrain'] #model_engine.deepspeed_io(train_set, **dataloader_kwargs)
+    dev_loader = dataloaders['valid'] #model_engine.deepspeed_io(dev_set, **dataloader_kwargs)
+    test_loader = dataloaders['test'] #model_engine.deepspeed_io(test_set, **dataloader_kwargs)
 
 
     # launch model training or inference
     if args.pretrain:
         # Pretrain the encoder and projection head
-        pretrain(moco, dataloaders, None, args, exp)
+        pretrain_deepspeed(model_engine, dataloaders, args, exp)
 
     if args.evaluate:
         # Load pretrained model, freeze layers
@@ -281,10 +281,10 @@ def main():
         test_loss, test_acc, test_acc_top5, df = evaluate(
             base_encoder, dataloaders, 'test', args.finetune_epochs, args, exp)
 
-        print('[Test] loss {:.4f} - acc {:.4f} - acc_top5 {:.4f}'.format(
-            test_loss, test_acc, test_acc_top5))
+        #print('[Test] loss {:.4f} - acc {:.4f} - acc_top5 {:.4f}'.format(
+        #test_loss, test_acc, test_acc_top5))
 
-        df.to_csv(f"{args.model_dir}/inference_result_model.csv")
+        #df.to_csv(f"{args.model_dir}/inference_result_model.csv")
 
         if args.distributed:  # cleanup
             torch.distributed.destroy_process_group()
