@@ -282,6 +282,9 @@ class ImagePatchesDataset(Dataset):
         self.two_crop = two_crop
         self.cut_mix = cut_mix
 
+        self.image_size = 256
+        self.pad = (self.image_size-self.image_size//2)//2
+
         self.label_enum = {'TUMOR': 1, 'NONTUMOR': 0}
         self.labels = list(dataframe.label.apply(lambda x: self.label_enum[x]))
 
@@ -320,12 +323,10 @@ class ImagePatchesDataset(Dataset):
         return img, label, row.patch_id, row.slide_id
 
     def create_cut_mix(self, target_image):
-        image_size = target_image.size[0]
-        pad = (image_size-image_size//4)//2
         jitterx = random.randint(-10,10)
         jittery = random.randint(-10,10)
 
-        center_crop = transforms.ToTensor()(target_image)[:, pad:-pad, pad:-pad]
+        center_crop = transforms.ToTensor()(target_image)[:, self.pad:-self.pad, self.pad:-self.pad]
 
         # Get two backgrounds
         bgs = self.dataframe.sample(2)
@@ -333,7 +334,7 @@ class ImagePatchesDataset(Dataset):
         for _, row in bgs.iterrows():
             path = f"{self.image_dir[0]}/{row.filename}"
             image_t = transforms.ToTensor()(Image.open(path))
-            image_t[:, pad+jitterx:-pad+jitterx, pad+jittery:-pad+jittery] = center_crop
+            image_t[:, self.pad+jitterx:-self.pad+jitterx, self.pad+jittery:-self.pad+jittery] = center_crop
 
             images.append(transforms.ToPILImage('RGB')(image_t))
         return images

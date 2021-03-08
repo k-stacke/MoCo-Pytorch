@@ -2,7 +2,7 @@
 
 DTime=$( date +%Y%m%d_%H%M )
 
-OUTPUT_FOLDER='/proj/karst/results/moco/'$DTime'_moco'
+OUTPUT_FOLDER='/proj/karst/results/moco/'$DTime'_moco_cutmix'
 
 python src/main.py \
 --my-config "config_train.conf" \

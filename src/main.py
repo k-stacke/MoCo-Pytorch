@@ -170,7 +170,7 @@ def setup(args, distributed):
 
 def main():
     """ Main """
-    neptune.init('k-stacke/self-supervised', backend=OfflineBackend())
+    neptune.init('k-stacke/self-supervised')#, backend=OfflineBackend())
 
     # Arguments
     args = parser.parse_args()
